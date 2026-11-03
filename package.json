@@ -9,15 +9,20 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
+    "db:migrate": "node scripts/migrate.mjs",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:check": "drizzle-kit check",
     "db:seed": "node scripts/seed-roles-permissions.mjs",
     "db:verify": "node scripts/verify-schema.mjs",
-    "db:test": "node scripts/test-db-connection.mjs && node scripts/test-db-schema.mjs && node scripts/test-auth-rbac.mjs"
+    "db:test:connection": "node scripts/test-db-connection.mjs",
+    "db:test:identity": "node scripts/test-identity-foundation.mjs",
+    "db:test:dashboard": "node scripts/test-dashboard.mjs",
+    "db:test": "node scripts/test-identity-foundation.mjs && node scripts/test-db-connection.mjs && node scripts/test-db-schema.mjs && node scripts/test-auth-rbac.mjs && node scripts/test-dashboard.mjs"
   },
   "dependencies": {
+    "@neon/config": "^1.10.0",
+    "@neon/env": "^1.6.8",
     "@node-rs/argon2": "^2.2.2",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.4",

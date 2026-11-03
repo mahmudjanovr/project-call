@@ -34,6 +34,24 @@ export interface AuthProviderProps {
   } | null;
 }
 
+const PERMISSION_ALIASES: Record<string, string[]> = {
+  "users:manage": ["users.read", "users.create", "users.update", "users.delete"],
+  "employees:manage": ["employees.read", "employees.create", "employees.update", "employees.delete"],
+  "roles:manage": ["roles.read", "roles.manage"],
+  "products:manage": ["settings.manage"],
+  "system:settings:manage": ["settings.manage"],
+  "system:settings:read": ["settings.read", "settings.manage"],
+  "audit:read": ["audit.read"],
+  "customers:read": ["customers.read"],
+  "customers:create": ["customers.create"],
+  "orders:create": ["orders.create"],
+  "orders:submit": ["orders.submit"],
+  "orders:review": ["orders.review"],
+  "orders:approve": ["orders.approve"],
+  "orders:reject": ["orders.reject"],
+  "operations:read": ["reports.read"],
+};
+
 export function AuthProvider({ children, initialAuth }: AuthProviderProps) {
   const user = initialAuth?.user ?? null;
   const employee = initialAuth?.employee ?? null;
@@ -41,13 +59,17 @@ export function AuthProvider({ children, initialAuth }: AuthProviderProps) {
   const permissions = React.useMemo(() => initialAuth?.permissions ?? [], [initialAuth?.permissions]);
 
   const hasPermission = React.useCallback(
-    (permissionCode: string) => permissions.includes(permissionCode),
+    (permissionKey: string) => {
+      if (permissions.includes(permissionKey)) return true;
+      const aliases = PERMISSION_ALIASES[permissionKey];
+      return Boolean(aliases && aliases.some((a) => permissions.includes(a)));
+    },
     [permissions]
   );
 
   const hasAnyPermission = React.useCallback(
-    (permissionCodes: string[]) => permissionCodes.some((code) => permissions.includes(code)),
-    [permissions]
+    (permissionCodes: string[]) => permissionCodes.some((code) => hasPermission(code)),
+    [hasPermission]
   );
 
   const logout = React.useCallback(async () => {

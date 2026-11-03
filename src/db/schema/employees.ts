@@ -34,7 +34,6 @@ export const employees = pgTable(
       .notNull(),
   },
   (table) => [
-    index("employees_user_id_idx").on(table.userId),
     index("employees_is_active_idx").on(table.isActive),
   ]
 );

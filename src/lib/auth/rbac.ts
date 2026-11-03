@@ -49,36 +49,61 @@ export async function requireAuth(shouldRedirect = true): Promise<AuthContext> {
   return auth;
 }
 
-/**
- * Deny-by-default permission guard.
- * Validates that the authenticated actor possesses the specified permission.
- * Throws ForbiddenError if permission is missing.
- */
-export async function requirePermission(
-  permissionCode: string,
-  shouldRedirect = false
-): Promise<AuthContext> {
-  const auth = await requireAuth(shouldRedirect);
-
-  if (!auth.permissions.includes(permissionCode)) {
-    if (shouldRedirect) {
-      redirect("/");
-    }
-    throw new ForbiddenError(`Forbidden: Missing required permission '${permissionCode}'`);
-  }
-
-  return auth;
-}
+const PERMISSION_ALIASES: Record<string, string[]> = {
+  "users:manage": ["users.read", "users.create", "users.update", "users.delete"],
+  "employees:manage": ["employees.read", "employees.create", "employees.update", "employees.delete"],
+  "roles:manage": ["roles.read", "roles.manage"],
+  "products:manage": ["settings.manage"],
+  "system:settings:manage": ["settings.manage"],
+  "system:settings:read": ["settings.read", "settings.manage"],
+  "audit:read": ["audit.read"],
+  "customers:read": ["customers.read"],
+  "customers:create": ["customers.create"],
+  "orders:create": ["orders.create"],
+  "orders:submit": ["orders.submit"],
+  "orders:review": ["orders.review"],
+  "orders:approve": ["orders.approve"],
+  "orders:reject": ["orders.reject"],
+  "operations:read": ["reports.read"],
+};
 
 /**
  * Checks if the actor has a given permission without throwing.
  */
 export function hasPermission(
   auth: AuthContext | null,
-  permissionCode: string
+  permissionKey: string
 ): boolean {
   if (!auth) return false;
-  return auth.permissions.includes(permissionCode);
+  if (auth.permissions.includes(permissionKey)) return true;
+
+  const aliases = PERMISSION_ALIASES[permissionKey];
+  if (aliases && aliases.some((alias) => auth.permissions.includes(alias))) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Deny-by-default permission guard.
+ * Validates that the authenticated actor possesses the specified permission.
+ * Throws ForbiddenError if permission is missing.
+ */
+export async function requirePermission(
+  permissionKey: string,
+  shouldRedirect = false
+): Promise<AuthContext> {
+  const auth = await requireAuth(shouldRedirect);
+
+  if (!hasPermission(auth, permissionKey)) {
+    if (shouldRedirect) {
+      redirect("/");
+    }
+    throw new ForbiddenError(`Forbidden: Missing required permission '${permissionKey}'`);
+  }
+
+  return auth;
 }
 
 /**
@@ -86,8 +111,8 @@ export function hasPermission(
  */
 export function hasAnyPermission(
   auth: AuthContext | null,
-  permissionCodes: string[]
+  permissionKeys: string[]
 ): boolean {
   if (!auth) return false;
-  return permissionCodes.some((code) => auth.permissions.includes(code));
+  return permissionKeys.some((key) => hasPermission(auth, key));
 }

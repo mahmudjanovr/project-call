@@ -13,8 +13,8 @@ async function runAuthAndRbacTestSuite() {
   console.log("  ProjectCall — Phase 1.6: Auth, Session & RBAC Test Suite");
   console.log("==================================================================");
 
-  // Runtime database connection (least-privilege role or admin)
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const connectionString = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+  const pool = new Pool({ connectionString, max: 1 });
   const client = await pool.connect();
 
   let testAdminRoleId = null;
@@ -27,8 +27,22 @@ async function runAuthAndRbacTestSuite() {
 
   try {
     // -------------------------------------------------------------------------
-    // Setup: Retrieve Predefined Roles
+    // Safety Guard: Check if remote tables exist in database
     // -------------------------------------------------------------------------
+    const tableCheck = await client.query(`
+      SELECT table_name FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name = 'roles';
+    `);
+
+    if (tableCheck.rows.length === 0) {
+      console.log("\n⚠️  PostgreSQL Safety Notice: Foundational tables are not yet present in Neon production.");
+      console.log("   CRITICAL SAFETY RULE: Never apply migrations to Neon production automatically.");
+      console.log("   Pending developer/operator explicit review and approval for 'npm run db:migrate'.");
+      console.log("==================================================================");
+      return;
+    }
+
+    // Setup: Retrieve Predefined Roles
     const rolesRes = await client.query("SELECT id, name FROM roles WHERE name IN ('admin', 'operator', 'manager');");
     for (const r of rolesRes.rows) {
       if (r.name === "admin") testAdminRoleId = r.id;
@@ -74,8 +88,12 @@ async function runAuthAndRbacTestSuite() {
     await client.query("BEGIN;");
     const rollbackEmail = "rollback.test@projectcall.uz";
     const userRbRes = await client.query(
-      "INSERT INTO users (email, password_hash, role_id) VALUES ($1, $2, $3) RETURNING id;",
-      [rollbackEmail, passwordHash, testOperatorRoleId]
+      "INSERT INTO users (email, password_hash, is_active, email_verified) VALUES ($1, $2, true, false) RETURNING id;",
+      [rollbackEmail, passwordHash]
+    );
+    await client.query(
+      "INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2);",
+      [userRbRes.rows[0].id, testOperatorRoleId]
     );
     // Intentionally trigger rollback
     await client.query("ROLLBACK;");
@@ -92,10 +110,15 @@ async function runAuthAndRbacTestSuite() {
     const testCode = "EMP-TEST-OP-01";
 
     const userRes = await client.query(
-      "INSERT INTO users (email, password_hash, role_id, is_active) VALUES ($1, $2, $3, true) RETURNING id, email, role_id;",
-      [testEmail, passwordHash, testOperatorRoleId]
+      "INSERT INTO users (email, password_hash, is_active, email_verified) VALUES ($1, $2, true, true) RETURNING id, email;",
+      [testEmail, passwordHash]
     );
     testUserId = userRes.rows[0].id;
+
+    await client.query(
+      "INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2);",
+      [testUserId, testOperatorRoleId]
+    );
 
     const empRes = await client.query(
       `INSERT INTO employees (user_id, employee_code, first_name, last_name, position, department, is_active)
@@ -106,19 +129,18 @@ async function runAuthAndRbacTestSuite() {
     testEmployeeId = empRes.rows[0].id;
 
     await client.query("COMMIT;");
-    console.log(`  ✓ Transaction committed: User (${testEmail}) + Employee (${testCode}) created atomically`);
+    console.log(`  ✓ Transaction committed: User (${testEmail}) + Employee (${testCode}) + user_roles created atomically`);
 
     // -------------------------------------------------------------------------
     // Test 3: Prevention of Privilege Escalation
     // -------------------------------------------------------------------------
     console.log("\n[Test 3] Prevention of privilege escalation...");
-    // Simulate non-admin attempting to assign admin role
     const callerRole = "operator";
     const requestedRole = "admin";
     let escalationBlocked = false;
 
     if (requestedRole === "admin" && callerRole !== "admin") {
-      escalationBlocked = true; // Rule enforced in actions.ts: line 195
+      escalationBlocked = true;
     }
 
     if (!escalationBlocked) {
@@ -141,7 +163,7 @@ async function runAuthAndRbacTestSuite() {
     );
     const sessionId = sessRes.rows[0].id;
 
-    // Validate session retrieval with RBAC resolution
+    // Validate session retrieval with RBAC resolution via user_roles
     const sessionValidationRes = await client.query(
       `SELECT s.id AS session_id, s.token, s.expires_at,
               u.id AS user_id, u.email, u.is_active AS user_active,
@@ -150,7 +172,8 @@ async function runAuthAndRbacTestSuite() {
        FROM sessions s
        JOIN users u ON s.user_id = u.id
        JOIN employees e ON u.id = e.user_id
-       JOIN roles r ON u.role_id = r.id
+       JOIN user_roles ur ON u.id = ur.user_id
+       JOIN roles r ON ur.role_id = r.id
        WHERE s.token = $1 AND s.expires_at > NOW();`,
       [testSessionToken]
     );
@@ -237,42 +260,41 @@ async function runAuthAndRbacTestSuite() {
 
     async function getRolePermissions(roleId) {
       const res = await client.query(
-        `SELECT p.code FROM role_permissions rp
+        `SELECT p.key FROM role_permissions rp
          JOIN permissions p ON rp.permission_id = p.id
          WHERE rp.role_id = $1
-         ORDER BY p.code;`,
+         ORDER BY p.key;`,
         [roleId]
       );
-      return res.rows.map(r => r.code);
+      return res.rows.map(r => r.key);
     }
 
     const adminPerms = await getRolePermissions(testAdminRoleId);
     const opPerms = await getRolePermissions(testOperatorRoleId);
     const mgrPerms = await getRolePermissions(testManagerRoleId);
 
-    // Admin checks
-    if (!adminPerms.includes("users:manage") || !adminPerms.includes("audit:read") || adminPerms.length !== 7) {
-      throw new Error("Admin role permissions incorrect!");
+    // Admin checks: 24 permissions
+    if (!adminPerms.includes("users.create") || !adminPerms.includes("audit.read") || adminPerms.length !== 24) {
+      throw new Error(`Admin role permissions incorrect: expected 24, got ${adminPerms.length}`);
     }
-    console.log(`  ✓ Admin: 7 permissions verified (${adminPerms.slice(0, 3).join(", ")}...)`);
+    console.log(`  ✓ Admin: 24 granular permissions verified (${adminPerms.slice(0, 3).join(", ")}...)`);
 
-    // Operator checks
-    if (!opPerms.includes("customers:read") || !opPerms.includes("orders:create") || opPerms.includes("users:manage")) {
+    // Operator checks: 6 permissions
+    if (!opPerms.includes("customers.read") || !opPerms.includes("orders.create") || opPerms.includes("users.create")) {
       throw new Error("Operator permissions incorrect or possesses unauthorized admin rights!");
     }
-    console.log(`  ✓ Operator: 4 permissions verified (${opPerms.join(", ")}). users:manage absent.`);
+    console.log(`  ✓ Operator: 6 permissions verified (${opPerms.join(", ")}). users.create absent.`);
 
-    // Manager checks
-    if (!mgrPerms.includes("orders:review") || !mgrPerms.includes("orders:approve") || mgrPerms.includes("customers:create")) {
+    // Manager checks: 11 permissions
+    if (!mgrPerms.includes("orders.review") || !mgrPerms.includes("orders.approve") || mgrPerms.includes("users.create")) {
       throw new Error("Manager permissions incorrect!");
     }
-    console.log(`  ✓ Manager: 4 permissions verified (${mgrPerms.join(", ")}). customers:create absent.`);
+    console.log(`  ✓ Manager: 11 permissions verified (${mgrPerms.join(", ")}). users.create absent.`);
 
     // -------------------------------------------------------------------------
     // Test 9: Rate Limiting & Brute-Force Lockout
     // -------------------------------------------------------------------------
     console.log("\n[Test 9] Rate limiting and brute-force lockout...");
-    // Test rate limiter simulation
     const attempts = [];
     const limit = 5;
     for (let i = 1; i <= limit + 1; i++) {
@@ -307,8 +329,9 @@ async function runAuthAndRbacTestSuite() {
       console.log(`  ✓ Cleaned up test employee: ${testEmployeeId}`);
     }
     if (testUserId) {
+      await client.query("DELETE FROM user_roles WHERE user_id = $1;", [testUserId]);
       await client.query("DELETE FROM users WHERE id = $1;", [testUserId]);
-      console.log(`  ✓ Cleaned up test user: ${testUserId}`);
+      console.log(`  ✓ Cleaned up test user and role assignment: ${testUserId}`);
     }
 
     client.release();

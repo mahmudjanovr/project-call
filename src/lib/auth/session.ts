@@ -1,7 +1,20 @@
 import crypto from "crypto";
-import { eq, and, gt } from "drizzle-orm";
+import { eq, and, gt, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { sessions, users, employees, roles, rolePermissions, permissions, type Session, type Employee, type Role, type SafeUser, toSafeUser } from "@/db/schema";
+import {
+  sessions,
+  users,
+  employees,
+  roles,
+  userRoles,
+  rolePermissions,
+  permissions,
+  type Session,
+  type Employee,
+  type Role,
+  type SafeUser,
+  toSafeUser,
+} from "@/db/schema";
 
 export const SESSION_COOKIE_NAME = "projectcall_session";
 export const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 days
@@ -93,32 +106,38 @@ export async function validateSessionToken(token: string): Promise<AuthContext |
     return null;
   }
 
-  // 4. Fetch role and permissions
-  const [roleRecord] = await db
-    .select()
-    .from(roles)
-    .where(eq(roles.id, userRecord.roleId))
-    .limit(1);
+  // 4. Fetch assigned roles and granular permissions canonically from user_roles
+  const userRoleRecords = await db
+    .select({
+      role: roles,
+    })
+    .from(userRoles)
+    .innerJoin(roles, eq(userRoles.roleId, roles.id))
+    .where(eq(userRoles.userId, userRecord.id));
 
-  if (!roleRecord) {
+  const firstRoleRecord = userRoleRecords[0];
+  if (!firstRoleRecord) {
     await invalidateSession(token);
     return null;
   }
 
+  const primaryRole = firstRoleRecord.role;
+  const roleIds = userRoleRecords.map((r) => r.role.id);
+
   const rolePerms = await db
-    .select({ code: permissions.code })
+    .select({ key: permissions.key })
     .from(rolePermissions)
     .innerJoin(permissions, eq(rolePermissions.permissionId, permissions.id))
-    .where(eq(rolePermissions.roleId, roleRecord.id));
+    .where(inArray(rolePermissions.roleId, roleIds));
 
-  const permissionCodes = rolePerms.map((rp) => rp.code);
+  const permissionKeys = Array.from(new Set(rolePerms.map((rp) => rp.key)));
 
   return {
     session,
     user: toSafeUser(userRecord),
     employee: employeeRecord,
-    role: roleRecord,
-    permissions: permissionCodes,
+    role: primaryRole,
+    permissions: permissionKeys,
   };
 }
 

@@ -5,14 +5,16 @@ import { rolePermissions } from "./role-permissions";
 /**
  * Permissions table
  * Granular permissions for RBAC authorization across business modules.
+ * Primary permission identifier: key (e.g., users.read, employees.create, orders.submit).
  */
 export const permissions = pgTable(
   "permissions",
   {
     id: uuid("id").defaultRandom().primaryKey(),
-    code: varchar("code", { length: 100 }).notNull().unique(),
-    name: varchar("name", { length: 100 }).notNull(),
-    module: varchar("module", { length: 50 }).notNull(),
+    key: varchar("key", { length: 100 }).notNull().unique(),
+    code: varchar("code", { length: 100 }),
+    name: varchar("name", { length: 100 }),
+    module: varchar("module", { length: 50 }),
     description: text("description"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .defaultNow()

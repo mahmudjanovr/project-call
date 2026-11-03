@@ -15,6 +15,27 @@
       "when": 1793625963384,
       "tag": "0001_uneven_morg",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793700437625,
+      "tag": "0002_dashing_mastermind",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793701871426,
+      "tag": "0003_sour_nightmare",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793702467605,
+      "tag": "0004_freezing_paladin",
+      "breakpoints": true
     }
   ]
 }

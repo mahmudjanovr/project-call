@@ -5,7 +5,8 @@ dotenv.config({ path: ".env.local" });
 dotenv.config({ path: ".env" });
 
 const { Pool } = pg;
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const connectionString = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+const pool = new Pool({ connectionString });
 
 async function verifyPostgreSqlSchema() {
   console.log("==================================================================");
@@ -22,6 +23,15 @@ async function verifyPostgreSqlSchema() {
     `);
     console.log("\n[1] Public Tables:");
     tablesRes.rows.forEach(r => console.log(`  - ${r.table_name}`));
+
+    // 1b. Drizzle Migrations Check
+    const migRes = await pool.query(`
+      SELECT id, hash, created_at 
+      FROM drizzle.__drizzle_migrations 
+      ORDER BY id ASC;
+    `);
+    console.log("\n[1b] Drizzle Migration Tracking Table (drizzle.__drizzle_migrations):");
+    migRes.rows.forEach(r => console.log(`  - [ID ${r.id}] hash=${r.hash} (timestamp: ${r.created_at})`));
 
     // 2. Constraints (Primary Keys, Foreign Keys, Unique)
     const constraintsRes = await pool.query(`

@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { eq, desc } from "drizzle-orm";
 import { db } from "@/db";
-import { users, employees, roles, type Employee, type Role } from "@/db/schema";
+import { users, employees, roles, userRoles, type Employee, type Role } from "@/db/schema";
 import { hashPassword, verifyPassword } from "./password";
 import { checkRateLimit, recordFailedAttempt, resetRateLimit } from "./rate-limiter";
 import {
@@ -158,9 +158,9 @@ export interface CreateEmployeeInput {
 export async function createEmployeeAction(
   input: CreateEmployeeInput
 ): Promise<ActionResponse<EmployeeListItem>> {
-  const auth = await requirePermission("employees:manage");
-  if (!auth.permissions.includes("users:manage")) {
-    throw new ForbiddenError("Missing 'users:manage' permission.");
+  const auth = await requirePermission("employees.create");
+  if (!auth.permissions.includes("users.create") && !auth.permissions.includes("users:manage")) {
+    throw new ForbiddenError("Missing 'users.create' permission.");
   }
 
   const { firstName, lastName, email, employeeCode, roleId, password, phone, position, department } = input;
@@ -219,14 +219,20 @@ export async function createEmployeeAction(
       .values({
         email: normalizedEmail,
         passwordHash,
-        roleId,
         isActive: true,
+        emailVerified: false,
       })
       .returning();
 
     if (!newUser) {
       throw new Error("Foydalanuvchi hisobini yaratishda xatolik yuz berdi.");
     }
+
+    // Assign user role in canonical user_roles join table
+    await tx.insert(userRoles).values({
+      userId: newUser.id,
+      roleId: targetRole.id,
+    });
 
     const [newEmployee] = await tx
       .insert(employees)
@@ -275,7 +281,7 @@ export async function toggleEmployeeStatusAction(
   employeeId: string,
   isActive: boolean
 ): Promise<ActionResponse> {
-  const auth = await requirePermission("users:manage");
+  const auth = await requirePermission("users.update");
 
   const [employee] = await db
     .select()
@@ -321,7 +327,7 @@ export async function resetEmployeePasswordAction(
   employeeId: string,
   newPassword: string
 ): Promise<ActionResponse> {
-  const auth = await requirePermission("users:manage");
+  const auth = await requirePermission("users.update");
 
   if (!newPassword || newPassword.length < 8) {
     return { success: false, error: "Yangi parol kamida 8 ta belgidan iborat bo'lishi kerak." };
@@ -348,13 +354,14 @@ export async function resetEmployeePasswordAction(
     return { success: false, error: "Foydalanuvchi hisobi topilmadi." };
   }
 
-  const [targetRole] = await db
-    .select()
-    .from(roles)
-    .where(eq(roles.id, targetUser.roleId))
+  const [targetUserRole] = await db
+    .select({ roleName: roles.name })
+    .from(userRoles)
+    .innerJoin(roles, eq(userRoles.roleId, roles.id))
+    .where(eq(userRoles.userId, employee.userId))
     .limit(1);
 
-  if (targetRole?.name === "admin" && auth.role.name !== "admin") {
+  if (targetUserRole?.roleName === "admin" && auth.role.name !== "admin") {
     throw new ForbiddenError("Faqat bosh administrator boshqa administrator parolini yangilay oladi.");
   }
 
@@ -375,7 +382,7 @@ export async function resetEmployeePasswordAction(
  * Queries employees with user accounts and roles.
  */
 export async function getEmployeesList(): Promise<EmployeeListItem[]> {
-  await requirePermission("employees:manage");
+  await requirePermission("employees.read");
 
   const rows = await db
     .select({
@@ -395,7 +402,8 @@ export async function getEmployeesList(): Promise<EmployeeListItem[]> {
     })
     .from(employees)
     .innerJoin(users, eq(employees.userId, users.id))
-    .innerJoin(roles, eq(users.roleId, roles.id))
+    .innerJoin(userRoles, eq(users.id, userRoles.userId))
+    .innerJoin(roles, eq(userRoles.roleId, roles.id))
     .orderBy(desc(employees.createdAt));
 
   return rows;

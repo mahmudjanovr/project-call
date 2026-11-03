@@ -21,7 +21,32 @@ export interface DatabaseHealthResult {
  */
 export function sanitizeDatabaseError(error: unknown): string {
   if (!error) return "Unknown database error";
-  const rawMessage = error instanceof Error ? error.message : String(error);
+
+  let rawMessage = "";
+
+  if (error instanceof Error) {
+    if (error.message && error.message.trim().length > 0) {
+      rawMessage = error.message;
+    } else if ("errors" in error && Array.isArray((error as { errors?: unknown[] }).errors)) {
+      rawMessage = (error as { errors: unknown[] }).errors
+        .map((e) => (e instanceof Error ? e.message : String(e)))
+        .filter(Boolean)
+        .join("; ");
+    } else if ("code" in error) {
+      rawMessage = `Database connection failed with code: ${String((error as { code: unknown }).code)}`;
+    } else {
+      rawMessage = error.toString();
+    }
+  } else {
+    rawMessage = String(error);
+  }
+
+  if (!rawMessage || rawMessage === "Error") {
+    rawMessage =
+      error && typeof error === "object" && "code" in error
+        ? `Database connection error: ${String((error as { code: unknown }).code)}`
+        : "Database connection error";
+  }
 
   // Redact PostgreSQL URI credentials: postgresql://user:password@host...
   return rawMessage

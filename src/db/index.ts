@@ -15,6 +15,8 @@ if (typeof window !== "undefined") {
 declare global {
   // eslint-disable-next-line no-var
   var _pgPool: Pool | undefined;
+  // eslint-disable-next-line no-var
+  var _pgPoolLogged: boolean | undefined;
 }
 
 /**
@@ -22,7 +24,8 @@ declare global {
  * Protects credentials by throwing safe descriptive errors without exposing connection strings.
  */
 export function getValidatedDatabaseUrl(): string {
-  const connectionString = process.env.DATABASE_URL;
+  // Application runtime strictly uses DATABASE_URL (pooled) or DATABASE_URL_UNPOOLED (direct)
+  const connectionString = process.env.DATABASE_URL || process.env.DATABASE_URL_UNPOOLED;
 
   if (!connectionString || connectionString.trim() === "") {
     throw new Error(
@@ -39,6 +42,25 @@ export function getValidatedDatabaseUrl(): string {
     );
   }
 
+  let parsed: URL;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    throw new Error("Configuration error: DATABASE_URL is not a valid URL.");
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+
+  // Validate that localhost is rejected unless explicitly permitted via ALLOW_LOCAL_DB
+  if (
+    (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") &&
+    process.env.ALLOW_LOCAL_DB !== "true"
+  ) {
+    throw new Error(
+      `Configuration error: Database host '${hostname}' is rejected. Expected remote Neon PostgreSQL (*.neon.tech). Set ALLOW_LOCAL_DB=true only for local offline development.`
+    );
+  }
+
   return connectionString;
 }
 
@@ -51,6 +73,12 @@ function getPool(): Pool {
   }
 
   const connectionString = getValidatedDatabaseUrl();
+  const parsed = new URL(connectionString);
+
+  if (!global._pgPoolLogged) {
+    console.log(`[Database] Initializing connection pool to host: ${parsed.hostname} (${parsed.pathname.replace(/^\//, "")})`);
+    global._pgPoolLogged = true;
+  }
 
   const isProduction = process.env.NODE_ENV === "production";
   const sslModeRequired =

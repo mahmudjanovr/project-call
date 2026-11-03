@@ -187,7 +187,7 @@ export default function EmployeesPage() {
           { label: "Xodimlar" },
         ]}
         actions={
-          hasPermission("employees:manage") && (
+          (hasPermission("employees.create") || hasPermission("employees:manage")) && (
             <Button
               variant="primary"
               size="md"
@@ -295,7 +295,7 @@ export default function EmployeesPage() {
                             : "Tizimga yangi xodim qo'shish uchun yuqoridagi tugmani bosing."
                         }
                         action={
-                          !searchTerm && hasPermission("employees:manage") ? (
+                          !searchTerm && (hasPermission("employees.create") || hasPermission("employees:manage")) ? (
                             <Button
                               variant="outline"
                               size="sm"
@@ -345,7 +345,7 @@ export default function EmployeesPage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          {hasPermission("users:manage") && (
+                          {(hasPermission("users.update") || hasPermission("users:manage")) && (
                             <>
                               <Button
                                 variant="outline"

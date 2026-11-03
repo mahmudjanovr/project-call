@@ -1,8 +1,8 @@
 import * as dotenv from "dotenv";
 import pg from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { relations, eq } from "drizzle-orm";
-import { pgTable, uuid, varchar, text, boolean, timestamp, primaryKey, index } from "drizzle-orm/pg-core";
+import { relations } from "drizzle-orm";
+import { pgTable, uuid, varchar, text, boolean, timestamp, primaryKey } from "drizzle-orm/pg-core";
 
 dotenv.config({ path: ".env.local" });
 dotenv.config({ path: ".env" });
@@ -23,13 +23,22 @@ const roles = pgTable("roles", {
 
 const permissions = pgTable("permissions", {
   id: uuid("id").defaultRandom().primaryKey(),
-  code: varchar("code", { length: 100 }).notNull().unique(),
-  name: varchar("name", { length: 100 }).notNull(),
-  module: varchar("module", { length: 50 }).notNull(),
+  key: varchar("key", { length: 100 }).notNull().unique(),
+  code: varchar("code", { length: 100 }),
+  name: varchar("name", { length: 100 }),
+  module: varchar("module", { length: 50 }),
   description: text("description"),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).defaultNow().notNull(),
 });
+
+const userRoles = pgTable("user_roles", {
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  roleId: uuid("role_id").notNull().references(() => roles.id, { onDelete: "cascade" }),
+  assignedAt: timestamp("assigned_at", { withTimezone: true, mode: "date" }).defaultNow().notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.userId, table.roleId] }),
+]);
 
 const rolePermissions = pgTable("role_permissions", {
   roleId: uuid("role_id").notNull().references(() => roles.id, { onDelete: "cascade" }),
@@ -43,8 +52,8 @@ const users = pgTable("users", {
   id: uuid("id").defaultRandom().primaryKey(),
   email: varchar("email", { length: 255 }).notNull().unique(),
   passwordHash: varchar("password_hash", { length: 255 }).notNull(),
-  roleId: uuid("role_id").notNull().references(() => roles.id, { onDelete: "restrict" }),
   isActive: boolean("is_active").notNull().default(true),
+  emailVerified: boolean("email_verified").notNull().default(false),
   lastLoginAt: timestamp("last_login_at", { withTimezone: true, mode: "date" }),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).defaultNow().notNull(),
@@ -65,7 +74,7 @@ const employees = pgTable("employees", {
 });
 
 const rolesRelations = relations(roles, ({ many }) => ({
-  users: many(users),
+  userRoles: many(userRoles),
   rolePermissions: many(rolePermissions),
 }));
 
@@ -78,8 +87,13 @@ const rolePermissionsRelations = relations(rolePermissions, ({ one }) => ({
   permission: one(permissions, { fields: [rolePermissions.permissionId], references: [permissions.id] }),
 }));
 
-const usersRelations = relations(users, ({ one }) => ({
-  role: one(roles, { fields: [users.roleId], references: [roles.id] }),
+const userRolesRelations = relations(userRoles, ({ one }) => ({
+  user: one(users, { fields: [userRoles.userId], references: [users.id] }),
+  role: one(roles, { fields: [userRoles.roleId], references: [roles.id] }),
+}));
+
+const usersRelations = relations(users, ({ one, many }) => ({
+  userRoles: many(userRoles),
   employee: one(employees, { fields: [users.id], references: [employees.userId] }),
 }));
 
@@ -90,11 +104,13 @@ const employeesRelations = relations(employees, ({ one }) => ({
 const dSchema = {
   roles,
   permissions,
+  userRoles,
   rolePermissions,
   users,
   employees,
   rolesRelations,
   permissionsRelations,
+  userRolesRelations,
   rolePermissionsRelations,
   usersRelations,
   employeesRelations,
@@ -105,7 +121,8 @@ async function runDatabaseSchemaTests() {
   console.log("  ProjectCall — Phase 1.5: Database Schema & RBAC Test Suite");
   console.log("==================================================================");
 
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const connectionString = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+  const pool = new Pool({ connectionString });
   const db = drizzle(pool, { schema: dSchema });
   const client = await pool.connect();
 
@@ -129,26 +146,26 @@ async function runDatabaseSchemaTests() {
     console.log(`  ✓ Test role created: ID ${testRoleId}`);
 
     // -------------------------------------------------------------------------
-    // Test 2: Insert test permissions
+    // Test 2: Insert test permissions (key-based)
     // -------------------------------------------------------------------------
     console.log("\n[Test 2] Insert test permissions...");
     const perm1Res = await client.query(`
-      INSERT INTO permissions (code, name, module, description)
-      VALUES ('test:audit:export', 'Test Audit Export', 'audit', 'Export logs test')
-      RETURNING id, code;
+      INSERT INTO permissions (key, code, description)
+      VALUES ('test.audit.export', 'test.audit.export', 'Export logs test')
+      RETURNING id, key;
     `);
     testPermId1 = perm1Res.rows[0].id;
 
     const perm2Res = await client.query(`
-      INSERT INTO permissions (code, name, module, description)
-      VALUES ('test:audit:archive', 'Test Audit Archive', 'audit', 'Archive logs test')
-      RETURNING id, code;
+      INSERT INTO permissions (key, code, description)
+      VALUES ('test.audit.archive', 'test.audit.archive', 'Archive logs test')
+      RETURNING id, key;
     `);
     testPermId2 = perm2Res.rows[0].id;
     console.log(`  ✓ Test permissions created: ${testPermId1}, ${testPermId2}`);
 
     // -------------------------------------------------------------------------
-    // Test 3: Associate permissions with test role
+    // Test 3: Associate permissions with test role (role_permissions)
     // -------------------------------------------------------------------------
     console.log("\n[Test 3] Associate permissions with test role (role_permissions)...");
     await client.query(`
@@ -157,29 +174,34 @@ async function runDatabaseSchemaTests() {
     `, [testRoleId, testPermId1, testPermId2]);
 
     const mappedRes = await client.query(`
-      SELECT p.code, p.name 
+      SELECT p.key, p.code 
       FROM permissions p
       JOIN role_permissions rp ON p.id = rp.permission_id
       WHERE rp.role_id = $1
-      ORDER BY p.code;
+      ORDER BY p.key;
     `, [testRoleId]);
 
     if (mappedRes.rows.length !== 2) {
       throw new Error(`Expected 2 permissions associated, got ${mappedRes.rows.length}`);
     }
-    console.log(`  ✓ Associated ${mappedRes.rows.length} permissions successfully: ${mappedRes.rows.map(r => r.code).join(", ")}`);
+    console.log(`  ✓ Associated ${mappedRes.rows.length} permissions successfully: ${mappedRes.rows.map(r => r.key).join(", ")}`);
 
     // -------------------------------------------------------------------------
-    // Test 4: Create a user account
+    // Test 4: Create a user account and assign to user_roles
     // -------------------------------------------------------------------------
     console.log("\n[Test 4] Create a user account (system account with hashed password)...");
     const userInsertRes = await client.query(`
-      INSERT INTO users (email, password_hash, role_id, is_active)
-      VALUES ('test.auditor@projectcall.uz', '$argon2id$v=19$m=65536,t=3,p=4$dummy_secure_hash', $1, true)
-      RETURNING id, email, role_id, is_active, created_at;
-    `, [testRoleId]);
+      INSERT INTO users (email, password_hash, is_active, email_verified)
+      VALUES ('test.auditor@projectcall.uz', '$argon2id$v=19$m=65536,t=3,p=4$dummy_secure_hash', true, true)
+      RETURNING id, email, is_active, created_at;
+    `);
     testUserId = userInsertRes.rows[0].id;
-    console.log(`  ✓ User created: ID ${testUserId}, Email: ${userInsertRes.rows[0].email}`);
+
+    await client.query(`
+      INSERT INTO user_roles (user_id, role_id)
+      VALUES ($1, $2);
+    `, [testUserId, testRoleId]);
+    console.log(`  ✓ User created: ID ${testUserId}, assigned to user_roles join table`);
 
     // -------------------------------------------------------------------------
     // Test 5: Create corresponding employee profile (1-to-1 relationship)
@@ -201,16 +223,17 @@ async function runDatabaseSchemaTests() {
       SELECT e.id AS employee_id, e.employee_code, e.first_name, e.last_name,
              u.id AS user_id, u.email, u.is_active AS user_active,
              r.id AS role_id, r.name AS role_name
-      FROM employees e
-      JOIN users u ON e.user_id = u.id
-      JOIN roles r ON u.role_id = r.id
-      WHERE e.id = $1;
+          FROM employees e
+          JOIN users u ON e.user_id = u.id
+          JOIN user_roles ur ON u.id = ur.user_id
+          JOIN roles r ON ur.role_id = r.id
+          WHERE e.id = $1;
     `, [testEmployeeId]);
 
     if (joinRes.rows.length !== 1 || joinRes.rows[0].email !== "test.auditor@projectcall.uz") {
       throw new Error("Foreign key join verification failed!");
     }
-    console.log(`  ✓ Foreign keys verified: Employee (${joinRes.rows[0].employee_code}) -> User (${joinRes.rows[0].email}) -> Role (${joinRes.rows[0].role_name})`);
+    console.log(`  ✓ Foreign keys verified: Employee (${joinRes.rows[0].employee_code}) -> User (${joinRes.rows[0].email}) -> user_roles -> Role (${joinRes.rows[0].role_name})`);
 
     // -------------------------------------------------------------------------
     // Test 7: Verify unique constraints
@@ -221,9 +244,9 @@ async function runDatabaseSchemaTests() {
     let duplicateEmailFailed = false;
     try {
       await client.query(`
-        INSERT INTO users (email, password_hash, role_id)
-        VALUES ('test.auditor@projectcall.uz', 'hash2', $1);
-      `, [testRoleId]);
+        INSERT INTO users (email, password_hash)
+        VALUES ('test.auditor@projectcall.uz', 'hash2');
+      `);
     } catch (err) {
       if (err.code === "23505") duplicateEmailFailed = true;
     }
@@ -261,18 +284,18 @@ async function runDatabaseSchemaTests() {
     // -------------------------------------------------------------------------
     console.log("\n[Test 8] Verify invalid relationships are rejected...");
 
-    // 8a: User with non-existent role_id
+    // 8a: user_roles with non-existent role_id
     let invalidRoleRejected = false;
     try {
       await client.query(`
-        INSERT INTO users (email, password_hash, role_id)
-        VALUES ('invalid.role@projectcall.uz', 'hash', '00000000-0000-0000-0000-000000000000');
-      `);
+        INSERT INTO user_roles (user_id, role_id)
+        VALUES ($1, '00000000-0000-0000-0000-000000000000');
+      `, [testUserId]);
     } catch (err) {
       if (err.code === "23503") invalidRoleRejected = true;
     }
-    if (!invalidRoleRejected) throw new Error("Foreign key check failed: accepted non-existent role_id!");
-    console.log("  ✓ User with non-existent role_id rejected (23503 foreign_key_violation)");
+    if (!invalidRoleRejected) throw new Error("Foreign key check failed: accepted non-existent role_id in user_roles!");
+    console.log("  ✓ user_roles with non-existent role_id rejected (23503 foreign_key_violation)");
 
     // 8b: Employee with non-existent user_id
     let invalidUserRejected = false;
@@ -297,24 +320,12 @@ async function runDatabaseSchemaTests() {
     try {
       await client.query("DELETE FROM users WHERE id = $1;", [testUserId]);
     } catch (err) {
-      if (err.code === "23503") deleteUserBlocked = true;
+      if (err.code === "23503" || err.code === "23001") deleteUserBlocked = true;
     }
     if (!deleteUserBlocked) {
       throw new Error("Security failure: User was deleted even though an employee profile is linked!");
     }
     console.log("  ✓ Deleting user blocked by ON DELETE RESTRICT on employees (prevents loss of historical records)");
-
-    // Attempt to delete role when user is assigned
-    let deleteRoleBlocked = false;
-    try {
-      await client.query("DELETE FROM roles WHERE id = $1;", [testRoleId]);
-    } catch (err) {
-      if (err.code === "23503") deleteRoleBlocked = true;
-    }
-    if (!deleteRoleBlocked) {
-      throw new Error("Security failure: Role was deleted even though users are assigned!");
-    }
-    console.log("  ✓ Deleting role blocked by ON DELETE RESTRICT on users");
 
     // Verify safe deactivation pattern
     await client.query("UPDATE users SET is_active = false WHERE id = $1;", [testUserId]);
@@ -335,9 +346,9 @@ async function runDatabaseSchemaTests() {
     console.log("\n[Test 10] Verify transactions and rollback behavior...");
     await client.query("BEGIN;");
     await client.query(`
-      INSERT INTO users (email, password_hash, role_id)
-      VALUES ('rollback.candidate@projectcall.uz', 'hash_rollback', $1);
-    `, [testRoleId]);
+      INSERT INTO users (email, password_hash)
+      VALUES ('rollback.candidate@projectcall.uz', 'hash_rollback');
+    `);
 
     // Force rollback
     await client.query("ROLLBACK;");
@@ -365,8 +376,8 @@ async function runDatabaseSchemaTests() {
       },
     });
 
-    if (!drizzleAdminRole || drizzleAdminRole.rolePermissions.length !== 7) {
-      throw new Error(`Drizzle relation query failed: expected 7 permissions for admin, found ${drizzleAdminRole?.rolePermissions?.length}`);
+    if (!drizzleAdminRole || drizzleAdminRole.rolePermissions.length !== 24) {
+      throw new Error(`Drizzle relation query failed: expected 24 permissions for admin, found ${drizzleAdminRole?.rolePermissions?.length}`);
     }
     console.log(`  ✓ Drizzle ORM loaded 'admin' role with ${drizzleAdminRole.rolePermissions.length} relational permissions`);
 
@@ -383,6 +394,7 @@ async function runDatabaseSchemaTests() {
       console.log(`  ✓ Cleaned up test employee: ${testEmployeeId}`);
     }
     if (testUserId) {
+      await client.query("DELETE FROM user_roles WHERE user_id = $1;", [testUserId]);
       await client.query("DELETE FROM users WHERE id = $1;", [testUserId]);
       console.log(`  ✓ Cleaned up test user: ${testUserId}`);
     }
